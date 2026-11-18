@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use futures::future::try_join_all;
-use futures::{ready, FutureExt, Stream};
+use futures::{FutureExt, Stream, ready};
 use rcgen::{CertificateParams, DistinguishedName, Error as RcgenError, PKCS_ECDSA_P256_SHA256};
+use rustls::ServerConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer as RustlsCertificate, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
-use rustls::ServerConfig;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Sleep;
@@ -345,7 +345,7 @@ impl<EC: 'static + Debug, EA: 'static + Debug> AcmeState<EC, EA> {
         url: &String,
     ) -> Result<(), OrderError> {
         let auth = account.auth(&config.client_config, url).await?;
-        let (domain, challenge_url) = match auth.status {
+        let domain = match auth.status {
             AuthStatus::Pending => {
                 let Identifier::Dns(domain) = auth.identifier;
                 log::info!("trigger challenge for {}", domain);
@@ -354,30 +354,45 @@ impl<EC: 'static + Debug, EA: 'static + Debug> AcmeState<EC, EA> {
                     &auth.challenges,
                     domain.clone(),
                 )?;
-                resolver.set_auth_key(domain.clone(), Arc::new(auth_key));
-                account
+                let domain_key = domain.to_ascii_lowercase();
+                resolver.set_auth_key(domain_key.clone(), Arc::new(auth_key));
+                if let Err(err) = account
                     .challenge(&config.client_config, &challenge.url)
-                    .await?;
-                (domain, challenge.url.clone())
+                    .await
+                {
+                    resolver.remove_auth_key(&domain_key);
+                    return Err(err.into());
+                }
+                domain_key
             }
             AuthStatus::Valid => return Ok(()),
             _ => return Err(OrderError::BadAuth(auth)),
         };
+        let mut result = Err(OrderError::TooManyAttemptsAuth(domain.clone()));
         for i in 0u64..5 {
             after(Duration::from_secs(1u64 << i)).await;
-            let auth = account.auth(&config.client_config, url).await?;
-            match auth.status {
-                AuthStatus::Pending => {
-                    log::info!("authorization for {} still pending", domain);
-                    account
-                        .challenge(&config.client_config, &challenge_url)
-                        .await?
+            match account.auth(&config.client_config, url).await {
+                Ok(auth) => match auth.status {
+                    AuthStatus::Pending => {
+                        log::info!("authorization for {} still pending", domain);
+                    }
+                    AuthStatus::Valid => {
+                        result = Ok(());
+                        break;
+                    }
+                    _ => {
+                        result = Err(OrderError::BadAuth(auth));
+                        break;
+                    }
+                },
+                Err(err) => {
+                    result = Err(err.into());
+                    break;
                 }
-                AuthStatus::Valid => return Ok(()),
-                _ => return Err(OrderError::BadAuth(auth)),
             }
         }
-        Err(OrderError::TooManyAttemptsAuth(domain))
+        resolver.remove_auth_key(&domain);
+        result
     }
     fn poll_next_infinite(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Event<EC, EA>> {
         loop {

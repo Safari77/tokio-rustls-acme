@@ -28,10 +28,21 @@ impl ResolvesServerCertAcme {
         })
     }
     pub(crate) fn set_cert(&self, cert: Arc<CertifiedKey>) {
-        self.inner.lock().unwrap().cert = Some(cert);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).cert = Some(cert);
     }
     pub(crate) fn set_auth_key(&self, domain: String, cert: Arc<CertifiedKey>) {
-        self.inner.lock().unwrap().auth_keys.insert(domain, cert);
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .auth_keys
+            .insert(domain.to_ascii_lowercase(), cert);
+    }
+    pub(crate) fn remove_auth_key(&self, domain: &str) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .auth_keys
+            .remove(&domain.to_ascii_lowercase());
     }
 }
 
@@ -49,13 +60,21 @@ impl ResolvesServerCert for ResolvesServerCertAcme {
                     None
                 }
                 Some(domain) => {
-                    let domain = domain.to_owned();
-                    let domain: String = AsRef::<str>::as_ref(&domain).into();
-                    self.inner.lock().unwrap().auth_keys.get(&domain).cloned()
+                    let domain = domain.to_ascii_lowercase();
+                    self.inner
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .auth_keys
+                        .get(&domain)
+                        .cloned()
                 }
             }
         } else {
-            self.inner.lock().unwrap().cert.clone()
+            self.inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cert
+                .clone()
         }
     }
 }
