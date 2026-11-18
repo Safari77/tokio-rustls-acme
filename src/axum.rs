@@ -62,7 +62,12 @@ impl<I: AsyncRead + AsyncWrite + Unpin + Send + 'static, S: Send + 'static> Futu
         loop {
             if let Some(tls_accept) = &mut self.tls_accept {
                 return match Pin::new(&mut *tls_accept).poll(cx) {
-                    Poll::Ready(Ok(tls)) => Poll::Ready(Ok((tls, self.service.take().unwrap()))),
+                    Poll::Ready(Ok(tls)) => match self.service.take() {
+                        Some(service) => Poll::Ready(Ok((tls, service))),
+                        None => {
+                            Poll::Ready(Err(io::Error::other("future polled after completion")))
+                        }
+                    },
                     Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
                     Poll::Pending => Poll::Pending,
                 };
