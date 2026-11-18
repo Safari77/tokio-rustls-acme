@@ -1,10 +1,10 @@
-use crate::crypto::CryptoError;
-use crate::crypto::digest::{Digest, SHA256, digest};
+use crate::crypto::digest::{digest, Digest, SHA256};
 use crate::crypto::hmac;
 use crate::crypto::rand::SystemRandom;
 use crate::crypto::signature::{EcdsaKeyPair, KeyPair};
-use base64::Engine;
+use crate::crypto::CryptoError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -16,7 +16,7 @@ pub(crate) fn sign(
     payload: &str,
 ) -> Result<String, JoseError> {
     let jwk = match kid {
-        None => Some(Jwk::new(key)),
+        None => Some(Jwk::new(key)?),
         Some(_) => None,
     };
     let protected = Protected::base64(jwk, kid, Some(nonce.as_ref()), url)?;
@@ -41,7 +41,7 @@ pub(crate) fn sign_eab(
     url: &str,
 ) -> Result<Body, JoseError> {
     let protected = Protected::hmac_base64(kid, url)?;
-    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Jwk::new(key))?);
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Jwk::new(key)?)?);
     let combined = format!("{}.{}", protected, payload);
     let signature = hmac::sign(eab_key, combined.as_bytes());
     let signature = URL_SAFE_NO_PAD.encode(signature.as_ref());
@@ -57,7 +57,7 @@ pub(crate) fn key_authorization_sha256(
     key: &EcdsaKeyPair,
     token: &str,
 ) -> Result<Digest, JoseError> {
-    let jwk = Jwk::new(key);
+    let jwk = Jwk::new(key)?;
     let key_authorization = format!("{}.{}", token, jwk.thumb_sha256_base64()?);
     Ok(digest(&SHA256, key_authorization.as_bytes()))
 }
@@ -124,16 +124,31 @@ struct Jwk {
 }
 
 impl Jwk {
-    pub(crate) fn new(key: &EcdsaKeyPair) -> Self {
-        let (x, y) = key.public_key().as_ref()[1..].split_at(32);
-        Self {
+    pub(crate) fn new(key: &EcdsaKeyPair) -> Result<Self, JoseError> {
+        let pub_bytes = key.public_key().as_ref();
+        let Some((&0x04, coords)) = pub_bytes.split_first() else {
+            return Err(JoseError::Crypto(CryptoError::new(
+                "invalid P-256 public key format",
+            )));
+        };
+        let Some((x, y)) = coords.split_at_checked(32) else {
+            return Err(JoseError::Crypto(CryptoError::new(
+                "truncated P-256 public key coordinates",
+            )));
+        };
+        if y.len() != 32 {
+            return Err(JoseError::Crypto(CryptoError::new(
+                "invalid P-256 public key Y coordinate length",
+            )));
+        }
+        Ok(Self {
             alg: "ES256",
             crv: "P-256",
             kty: "EC",
             u: "sig",
             x: URL_SAFE_NO_PAD.encode(x),
             y: URL_SAFE_NO_PAD.encode(y),
-        }
+        })
     }
     pub(crate) fn thumb_sha256_base64(&self) -> Result<String, JoseError> {
         let jwk_thumb = JwkThumb {
@@ -168,7 +183,7 @@ pub enum JoseError {
 mod tests {
     use super::*;
     use crate::crypto::signature::{
-        ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING, UnparsedPublicKey,
+        UnparsedPublicKey, ECDSA_P256_SHA256_FIXED, ECDSA_P256_SHA256_FIXED_SIGNING,
     };
 
     #[derive(serde::Deserialize)]
