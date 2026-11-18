@@ -1,14 +1,14 @@
+use crate::acceptor::{server_config, AcmeAccept, AcmeAcceptor};
 use crate::AcmeState;
-use crate::acceptor::{AcmeAccept, AcmeAcceptor, server_config};
-use futures::Stream;
 use futures::stream::{FusedStream, FuturesUnordered};
+use futures::Stream;
 use rustls::ServerConfig;
 use std::fmt::Debug;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::{Accept, server::TlsStream};
+use tokio_rustls::{server::TlsStream, Accept};
 
 /// [`Stream`] of accepted application TLS connections.
 ///
@@ -30,22 +30,22 @@ pub struct Incoming<
 }
 
 impl<
-    TCP: AsyncRead + AsyncWrite + Unpin,
-    ETCP,
-    ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
-    EC: Debug + 'static,
-    EA: Debug + 'static,
-> Unpin for Incoming<TCP, ETCP, ITCP, EC, EA>
+        TCP: AsyncRead + AsyncWrite + Unpin,
+        ETCP,
+        ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
+        EC: Debug + 'static,
+        EA: Debug + 'static,
+    > Unpin for Incoming<TCP, ETCP, ITCP, EC, EA>
 {
 }
 
 impl<
-    TCP: AsyncRead + AsyncWrite + Unpin,
-    ETCP,
-    ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
-    EC: Debug + 'static,
-    EA: Debug + 'static,
-> Incoming<TCP, ETCP, ITCP, EC, EA>
+        TCP: AsyncRead + AsyncWrite + Unpin,
+        ETCP,
+        ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
+        EC: Debug + 'static,
+        EA: Debug + 'static,
+    > Incoming<TCP, ETCP, ITCP, EC, EA>
 {
     pub fn new_with_server(
         tcp_incoming: ITCP,
@@ -76,12 +76,12 @@ impl<
 }
 
 impl<
-    TCP: AsyncRead + AsyncWrite + Unpin,
-    ETCP,
-    ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
-    EC: Debug + 'static,
-    EA: Debug + 'static,
-> Stream for Incoming<TCP, ETCP, ITCP, EC, EA>
+        TCP: AsyncRead + AsyncWrite + Unpin,
+        ETCP,
+        ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
+        EC: Debug + 'static,
+        EA: Debug + 'static,
+    > Stream for Incoming<TCP, ETCP, ITCP, EC, EA>
 {
     type Item = Result<TlsStream<TCP>, ETCP>;
 
@@ -95,8 +95,7 @@ impl<
                     }
                     continue;
                 }
-                Poll::Ready(None) => unreachable!(),
-                Poll::Pending => {}
+                Poll::Ready(None) | Poll::Pending => {}
             }
             match Pin::new(&mut self.acme_accepting).poll_next(cx) {
                 Poll::Ready(Some(Ok(Some(tls)))) => self
@@ -130,7 +129,9 @@ impl<
             match Pin::new(tcp_incoming).poll_next(cx) {
                 Poll::Ready(Some(Ok(tcp))) => self.acme_accepting.push(self.acceptor.accept(tcp)),
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
-                Poll::Ready(None) => drop(self.tcp_incoming.as_mut()),
+                Poll::Ready(None) => {
+                    self.tcp_incoming = None;
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }
@@ -138,12 +139,12 @@ impl<
 }
 
 impl<
-    TCP: AsyncRead + AsyncWrite + Unpin,
-    ETCP,
-    ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
-    EC: Debug + 'static,
-    EA: Debug + 'static,
-> FusedStream for Incoming<TCP, ETCP, ITCP, EC, EA>
+        TCP: AsyncRead + AsyncWrite + Unpin,
+        ETCP,
+        ITCP: Stream<Item = Result<TCP, ETCP>> + Unpin,
+        EC: Debug + 'static,
+        EA: Debug + 'static,
+    > FusedStream for Incoming<TCP, ETCP, ITCP, EC, EA>
 {
     fn is_terminated(&self) -> bool {
         self.tcp_incoming.is_none()
