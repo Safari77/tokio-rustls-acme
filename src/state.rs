@@ -8,12 +8,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
 use futures::future::try_join_all;
-use futures::{FutureExt, Stream, ready};
+use futures::{ready, FutureExt, Stream};
 use rcgen::{CertificateParams, DistinguishedName, Error as RcgenError, PKCS_ECDSA_P256_SHA256};
-use rustls::ServerConfig;
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer as RustlsCertificate, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
+use rustls::ServerConfig;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Sleep;
@@ -104,6 +104,8 @@ pub enum CertParseError {
     TooFewPem(usize),
     #[error("unsupported private key type")]
     InvalidPrivateKey,
+    #[error("invalid certificate validity timestamp")]
+    InvalidValidityTimestamp,
 }
 
 impl<EC: 'static + Debug, EA: 'static + Debug> AcmeState<EC, EA> {
@@ -217,8 +219,15 @@ impl<EC: 'static + Debug, EA: 'static + Debug> AcmeState<EC, EA> {
         let validity = match parse_x509_certificate(cert_chain[0].as_ref()) {
             Ok((_, cert)) => {
                 let validity = cert.validity();
-                [validity.not_before, validity.not_after]
-                    .map(|t| Utc.timestamp_opt(t.timestamp(), 0).earliest().unwrap())
+                let not_before = Utc
+                    .timestamp_opt(validity.not_before.timestamp(), 0)
+                    .earliest()
+                    .ok_or(CertParseError::InvalidValidityTimestamp)?;
+                let not_after = Utc
+                    .timestamp_opt(validity.not_after.timestamp(), 0)
+                    .earliest()
+                    .ok_or(CertParseError::InvalidValidityTimestamp)?;
+                [not_before, not_after]
             }
             Err(err) => return Err(CertParseError::X509(err)),
         };
