@@ -134,3 +134,90 @@ impl<EC: Debug, EA: Debug> AccountCache for TestCache<EC, EA> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::caches::DirCache;
+    use crate::{AccountCache, CertCache};
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_dir_cache_cert_and_account_roundtrip() {
+        let tmp_dir = tempdir().unwrap();
+        // Use a non-existent subdirectory to verify create_dir_all works
+        let cache_path = tmp_dir.path().join("nested/acme_cache");
+        let cache = DirCache::new(&cache_path);
+
+        let domains = vec!["example.com".to_string(), "www.example.com".to_string()];
+        let contacts = vec!["mailto:admin@example.com".to_string()];
+        let dir_url = "https://acme-staging-v02.api.letsencrypt.org/directory";
+
+        // 1. Missing entries return Ok(None)
+        assert_eq!(cache.load_cert(&domains, dir_url).await.unwrap(), None);
+        assert_eq!(cache.load_account(&contacts, dir_url).await.unwrap(), None);
+
+        // 2. Store and load certificate
+        let cert_data = b"-----BEGIN PRIVATE KEY-----\n...\n-----BEGIN CERTIFICATE-----\n...";
+        cache
+            .store_cert(&domains, dir_url, cert_data)
+            .await
+            .unwrap();
+        assert_eq!(
+            cache.load_cert(&domains, dir_url).await.unwrap().as_deref(),
+            Some(&cert_data[..])
+        );
+
+        // 3. Atomic overwrite of existing certificate
+        let updated_cert = b"updated-cert-pem-data";
+        cache
+            .store_cert(&domains, dir_url, updated_cert)
+            .await
+            .unwrap();
+        assert_eq!(
+            cache.load_cert(&domains, dir_url).await.unwrap().as_deref(),
+            Some(&updated_cert[..])
+        );
+
+        // 4. Store and load account
+        let account_data = b"account-credentials-json";
+        cache
+            .store_account(&contacts, dir_url, account_data)
+            .await
+            .unwrap();
+        assert_eq!(
+            cache
+                .load_account(&contacts, dir_url)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(&account_data[..])
+        );
+
+        // 5. Verify no leftover .tmp. files and 0600 permissions on Unix
+        let mut entries = std::fs::read_dir(&cache_path)
+            .unwrap()
+            .map(|res| res.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        assert_eq!(entries.len(), 2);
+
+        for entry in entries {
+            let name = entry.file_name().unwrap().to_string_lossy();
+            assert!(
+                !name.starts_with('.'),
+                "unexpected leftover temporary file: {name}"
+            );
+            assert!(
+                name.starts_with("cached_cert_") || name.starts_with("cached_account_"),
+                "unexpected file in cache dir: {name}"
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&entry).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "expected 0600 permissions on {entry:?}");
+            }
+        }
+    }
+}

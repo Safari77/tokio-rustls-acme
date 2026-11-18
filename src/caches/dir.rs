@@ -3,7 +3,7 @@ use crate::{AccountCache, CertCache};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use std::io::ErrorKind;
+use std::io::{Error, ErrorKind, Write};
 use std::path::Path;
 use tokio::fs;
 
@@ -33,11 +33,38 @@ impl<P: AsRef<Path> + Send + Sync> DirCache<P> {
         file: impl AsRef<Path>,
         contents: impl AsRef<[u8]>,
     ) -> Result<(), std::io::Error> {
-        fs::create_dir_all(&self.inner).await?;
-        let path = self.inner.as_ref().join(file);
-        fs::write(path, contents).await
-    }
+        let final_path = self.inner.as_ref().join(file.as_ref());
+        let data = contents.as_ref().to_vec();
 
+        tokio::task::spawn_blocking(move || {
+            let target_dir = final_path.parent().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "target path has no parent directory",
+                )
+            })?;
+
+            std::fs::create_dir_all(target_dir)?;
+
+            // Creates .tmpXXXXXX in target_dir with O_CREAT | O_EXCL and mode 0o600 on Unix
+            let mut tmp = tempfile::NamedTempFile::new_in(target_dir)?;
+
+            tmp.write_all(&data)?;
+            tmp.as_file().sync_all()?;
+
+            // Atomically renames over final_path; removes tmp file automatically on failure
+            tmp.persist(&final_path)?;
+
+            #[cfg(unix)]
+            if let Ok(dir_file) = std::fs::File::open(target_dir) {
+                let _ = dir_file.sync_all();
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(Error::other)?
+    }
     fn cached_account_file_name(contact: &[String], directory_url: impl AsRef<str>) -> String {
         let mut ctx = Context::new(&SHA256);
         for el in contact {
